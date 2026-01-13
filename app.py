@@ -56,12 +56,20 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 def get_participants_data():
     # 1. 优先尝试连接 Google Sheets
     try:
-        df = conn.read(worksheet="Participants", usecols=[0, 1])
-        if len(df.columns) >= 2:
-            df.columns = ['Name', 'Category']
+        # 读取前3列：Name, Email, Category
+        df = conn.read(worksheet="Participants", usecols=[0, 1, 2])
+        
+        # 强制重命名列以匹配逻辑
+        if len(df.columns) >= 3:
+            df.columns = ['Name', 'Email', 'Category']
+        elif len(df.columns) == 2:
+            df.columns = ['Name', 'Email']
+            df['Category'] = 'Pre-registered'
         else:
             df.columns = ['Name']
+            df['Email'] = '-'
             df['Category'] = 'Pre-registered'
+            
         return df.dropna(subset=['Name']).astype(str)
     except Exception:
         # 2. 如果 Google 失败 (没配 API 或断网)，读取本地上传的备份文件
@@ -69,14 +77,14 @@ def get_participants_data():
             try:
                 df = pd.read_csv(LOCAL_NAMELIST)
                 # 确保列名匹配
-                if 'Name' not in df.columns:
-                    df.rename(columns={df.columns[0]: 'Name'}, inplace=True)
-                if 'Category' not in df.columns:
-                    df['Category'] = 'Uploaded-List'
+                required_cols = ['Name', 'Email', 'Category']
+                for col in required_cols:
+                    if col not in df.columns:
+                        df[col] = '-' # 缺失列补全
                 return df.astype(str)
             except:
                 pass
-        return pd.DataFrame(columns=['Name', 'Category'])
+        return pd.DataFrame(columns=['Name', 'Email', 'Category'])
 
 def get_logs_data():
     # 读取日志也是同样的逻辑：先云端，后本地
@@ -87,7 +95,7 @@ def get_logs_data():
             return pd.read_csv(BACKUP_FILE)
         return pd.DataFrame()
 
-# --- C. Gemini AI ---
+# --- C. Gemini AI (仅保留欢迎语功能) ---
 def ai_generate_welcome(name, session_name):
     if not HAS_AI:
         return f"Welcome {name}! Enjoy the class."
@@ -98,16 +106,6 @@ def ai_generate_welcome(name, session_name):
         return response.text
     except:
         return f"Welcome {name}! Ready to master the markets?"
-
-def ai_suggest_title(topic):
-    if not HAS_AI: return f"DFMA Session: {topic}"
-    try:
-        model = genai.GenerativeModel('gemini-2.5-flash-preview-09-2025')
-        prompt = f"Create a professional session title about: '{topic}'. Return ONLY the title."
-        response = model.generate_content(prompt)
-        return response.text.strip().replace('"', '')
-    except:
-        return f"Advanced Analysis: {topic}"
 
 # --- D. 写入逻辑 (双写模式) ---
 def write_log(session_data, name, user_type, email="-", phone="-"):
@@ -129,7 +127,7 @@ def write_log(session_data, name, user_type, email="-", phone="-"):
         "Timestamp": timestamp_str,
         "Session": session_data['name'],
         "Name": name,
-        "Type": user_type,
+        "Type": user_type, # Category
         "Status": status,
         "Email": email,
         "Phone": phone
@@ -141,7 +139,7 @@ def write_log(session_data, name, user_type, email="-", phone="-"):
     else:
         new_data.to_csv(BACKUP_FILE, mode='a', header=False, index=False)
 
-    # 2. 选写：尝试同步 Google Sheet
+    # 2. 选写：尝试同步 Google Sheet (Logs 分页)
     try:
         existing_data = conn.read(worksheet="Logs", ttl=0)
         updated_df = pd.concat([existing_data, new_data], ignore_index=True)
@@ -178,34 +176,31 @@ with st.sidebar:
         
         with tab_create:
             st.subheader("New Session")
-            c1, c2 = st.columns([2, 1])
-            topic = c1.text_input("Topic Keyword")
-            if c2.button("✨ AI Suggest"):
-                with st.spinner("Thinking..."):
-                    suggestion = ai_suggest_title(topic)
-                    st.session_state.new_title = suggestion
-            
-            sess_name = st.text_input("Session Name", value=st.session_state.get('new_title', ''))
+            # 移除了 AI 建议标题功能
+            sess_name = st.text_input("Session Name", placeholder="e.g. DFMA Module 1")
             sess_date = st.date_input("Date")
             sess_time = st.time_input("Start Time")
             sess_dur = st.selectbox("Late Buffer", ["5m", "10m", "15m", "30m", "1hr"])
             
             if st.button("Create"):
-                new_code = str(random.randint(100000, 999999))
-                new_sess = {
-                    "id": int(time.time()),
-                    "name": sess_name,
-                    "code": new_code,
-                    "date": str(sess_date),
-                    "start": str(sess_time),
-                    "duration": sess_dur,
-                    "active": True
-                }
-                sessions.append(new_sess)
-                save_sessions(sessions)
-                st.success(f"Code: {new_code}")
-                time.sleep(1)
-                st.rerun()
+                if not sess_name:
+                    st.error("Please enter a Session Name")
+                else:
+                    new_code = str(random.randint(100000, 999999))
+                    new_sess = {
+                        "id": int(time.time()),
+                        "name": sess_name,
+                        "code": new_code,
+                        "date": str(sess_date),
+                        "start": str(sess_time),
+                        "duration": sess_dur,
+                        "active": True
+                    }
+                    sessions.append(new_sess)
+                    save_sessions(sessions)
+                    st.success(f"Code: {new_code}")
+                    time.sleep(1)
+                    st.rerun()
 
         with tab_manage:
             for s in active_sessions:
@@ -308,13 +303,16 @@ elif st.session_state.page == 'HOME':
         
         if selected_name:
             if st.button("Confirm Check-in", type="primary"):
-                # 获取类别
+                # 获取用户信息
                 try:
-                    cat = df_participants[df_participants['Name'] == selected_name].iloc[0]['Category']
+                    user_row = df_participants[df_participants['Name'] == selected_name].iloc[0]
+                    cat = user_row['Category']
+                    email = user_row['Email']
                 except:
                     cat = "Unknown"
+                    email = "-"
                     
-                success, status = write_log(target_session, selected_name, cat)
+                success, status = write_log(target_session, selected_name, cat, email=email)
                 st.session_state.current_user = {"name": selected_name, "status": status, "session": target_session['name']}
                 
                 with st.spinner("Generating pass..."):
