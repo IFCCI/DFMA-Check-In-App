@@ -262,7 +262,7 @@ if st.session_state.page == 'PROJECTION':
         with col_left:
             st.info(f"### Passcode: {s['code']}")
             # QR Code
-            url = "https://dfma-attendance.streamlit.app" 
+            url = "https://dfma-checkin-app-2026.streamlit.app" 
             qr = qrcode.make(url)
             img_bytes = io.BytesIO()
             qr.save(img_bytes, format='PNG')
