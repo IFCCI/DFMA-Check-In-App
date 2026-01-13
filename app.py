@@ -131,7 +131,7 @@ def load_sessions():
 def save_sessions(sessions):
     with open(SESSION_FILE, 'w') as f: json.dump(sessions, f)
 
-# --- 数据读取 (IC 验证支持) ---
+# --- 数据读取 (IC 验证支持 - 修复版) ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 @st.cache_data(ttl=600)
@@ -155,13 +155,24 @@ def get_participants_data():
         for col in expected_cols:
             if col not in df.columns: df[col] = '-'
             
-        return df.dropna(subset=['Name']).astype(str)
+        # 1. 先转字符串
+        df = df.astype(str)
+        
+        # 2. 🧼 关键修复：清洗 IC 列
+        # 去除 .0 (针对数字被读成 float 的情况) 并去除前后空格
+        if 'IC' in df.columns:
+            df['IC'] = df['IC'].str.replace(r'\.0$', '', regex=True).str.strip()
+
+        return df.dropna(subset=['Name'])
     except Exception:
         # 灾备：读本地
         if os.path.exists(LOCAL_NAMELIST):
             try:
                 df = pd.read_csv(LOCAL_NAMELIST)
-                return df.astype(str)
+                df = df.astype(str)
+                if 'IC' in df.columns:
+                    df['IC'] = df['IC'].str.replace(r'\.0$', '', regex=True).str.strip()
+                return df
             except: pass
         return pd.DataFrame(columns=['Name', 'Email', 'Category', 'IC'])
 
